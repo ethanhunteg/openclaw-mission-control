@@ -41,6 +41,7 @@ import {
   HelpCircle,
   Puzzle,
   Radio,
+  Gauge,
 } from "lucide-react";
 import { getChatUnreadCount, subscribeChatStore } from "@/lib/chat-store";
 
@@ -61,6 +62,7 @@ const isAgentbayHosting = process.env.NEXT_PUBLIC_AGENTBAY_HOSTED === "true";
 const defaultNavItems: NavItem[] = [
   // ── Overview ──
   { group: "Overview", section: "dashboard", label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
+  { section: "live-work", label: "Live Work", icon: Gauge, href: "/live-work" },
   { section: "activity", label: "Activity", icon: Activity, href: "/activity" },
   { section: "usage", label: "Usage", icon: BarChart3, href: "/usage" },
   // ── Agents ──
@@ -108,6 +110,7 @@ const hostedNavItems: NavItem[] = [
   { section: "help", label: "Help & Support", icon: HelpCircle, href: "/help" },
   // ── Overview ──
   { group: "Overview", section: "dashboard", label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
+  { section: "live-work", label: "Live Work", icon: Gauge, href: "/live-work" },
   { section: "activity", label: "Activity", icon: Activity, href: "/activity" },
   { section: "usage", label: "Usage", icon: BarChart3, href: "/usage" },
   // ── Agents ──
@@ -166,6 +169,7 @@ function deriveSectionFromPath(pathname: string): string | null {
     "chat",
     "agents",
     "tasks",
+    "live-work",
     "calendar",
     "integrations",
     "sessions",

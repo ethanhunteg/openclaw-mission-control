@@ -8,6 +8,7 @@ const SECTION_TO_PATH: Record<string, string> = {
   chat: "/chat",
   agents: "/agents",
   tasks: "/tasks",
+  "live-work": "/live-work",
   cron: "/cron",
   heartbeat: "/heartbeat",
   sessions: "/sessions",

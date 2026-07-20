@@ -24,6 +24,10 @@ const TasksView = dynamic(
   () => import("@/components/tasks-view").then((m) => m.TasksView),
   { loading: () => <SectionLoading /> }
 );
+const LiveWorkView = dynamic(
+  () => import("@/components/live-work-view").then((m) => m.LiveWorkView),
+  { loading: () => <SectionLoading /> }
+);
 const CronView = dynamic(
   () => import("@/components/cron-view").then((m) => m.CronView),
   { loading: () => <SectionLoading /> }
@@ -136,6 +140,7 @@ export type DashboardSection =
   | "chat"
   | "agents"
   | "tasks"
+  | "live-work"
   | "cron"
   | "heartbeat"
   | "sessions"
@@ -176,6 +181,8 @@ function SectionContent({ section }: { section: DashboardSection }) {
       return <AgentsView />;
     case "tasks":
       return <TasksView />;
+    case "live-work":
+      return <LiveWorkView />;
     case "cron":
       return <CronView />;
     case "heartbeat":
