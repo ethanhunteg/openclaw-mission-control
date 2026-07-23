@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findActiveRunCandidates, findActiveTool, type AuditEvent } from "./live-work.ts";
+import { classifyLiveWork, findActiveRunCandidates, findActiveTool, type AuditEvent } from "./live-work.ts";
 
 test("findActiveRunCandidates keeps unfinished runs and drops terminal runs", () => {
   const events: AuditEvent[] = [
@@ -17,4 +17,39 @@ test("findActiveTool returns only a tool call without a later terminal event", (
     { kind: "tool_action", runId: "run", toolCallId: "active", toolName: "bash", occurredAt: 30, status: "started" },
   ];
   assert.deepEqual(findActiveTool(events), { name: "bash", startedAt: 30 });
+});
+
+test("classifyLiveWork requires a running session and fresh progress evidence", () => {
+  const candidate = {
+    runId: "run",
+    sessionKey: "agent:main:discord:channel:1",
+    sessionId: "session",
+    agentId: "main",
+    startedAt: 1_000,
+    lastEventAt: 9_000,
+  };
+  assert.equal(classifyLiveWork({ candidate, sessionStatus: "running", now: 10_000, freshnessMs: 5_000 }).truthState, "running");
+  assert.equal(classifyLiveWork({ candidate, sessionStatus: "running", now: 20_000, freshnessMs: 5_000 }).truthState, "stale");
+  assert.equal(classifyLiveWork({ candidate, sessionStatus: "idle", now: 10_000, freshnessMs: 5_000 }).truthState, "orphaned");
+  assert.equal(classifyLiveWork({ candidate, describeFailed: true, now: 10_000, freshnessMs: 5_000 }).truthState, "unverified");
+});
+
+test("active tool evidence advances last progress time", () => {
+  const candidate = {
+    runId: "run",
+    sessionKey: "agent:main:discord:channel:1",
+    sessionId: null,
+    agentId: "main",
+    startedAt: 1_000,
+    lastEventAt: 2_000,
+  };
+  const result = classifyLiveWork({
+    candidate,
+    sessionStatus: "running",
+    lastProgressAt: 9_000,
+    now: 10_000,
+    freshnessMs: 5_000,
+  });
+  assert.equal(result.truthState, "running");
+  assert.equal(result.lastProgressAt, 9_000);
 });

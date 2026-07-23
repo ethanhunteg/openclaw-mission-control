@@ -21,7 +21,10 @@ export type ActiveRunCandidate = {
   sessionId: string | null;
   agentId: string;
   startedAt: number;
+  lastEventAt: number;
 };
+
+export type LiveTruthState = "running" | "stale" | "orphaned" | "unverified";
 
 const TERMINAL_RUN_STATUSES = new Set([
   "succeeded",
@@ -60,10 +63,30 @@ export function findActiveRunCandidates(events: AuditEvent[]): ActiveRunCandidat
       sessionId: start.sessionId || null,
       agentId: start.agentId || start.actor?.id || "unknown",
       startedAt: Number(start.occurredAt || 0),
+      lastEventAt: Number(latest.occurredAt || start.occurredAt || 0),
     });
   }
 
   return candidates.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export function classifyLiveWork(params: {
+  candidate: ActiveRunCandidate;
+  sessionStatus?: string;
+  lastProgressAt?: number;
+  now: number;
+  freshnessMs: number;
+  describeFailed?: boolean;
+}): { truthState: LiveTruthState; lastProgressAt: number; staleForMs: number } {
+  const lastProgressAt = Math.max(
+    Number(params.candidate.lastEventAt || 0),
+    Number(params.lastProgressAt || 0),
+  );
+  const staleForMs = Math.max(0, params.now - lastProgressAt);
+  if (params.describeFailed) return { truthState: "unverified", lastProgressAt, staleForMs };
+  if (params.sessionStatus !== "running") return { truthState: "orphaned", lastProgressAt, staleForMs };
+  if (!lastProgressAt || staleForMs > params.freshnessMs) return { truthState: "stale", lastProgressAt, staleForMs };
+  return { truthState: "running", lastProgressAt, staleForMs };
 }
 export function findActiveTool(events: AuditEvent[]): { name: string; startedAt: number } | null {
   const latestByCall = new Map<string, AuditEvent>();
