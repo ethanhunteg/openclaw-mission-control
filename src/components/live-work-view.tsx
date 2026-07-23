@@ -19,6 +19,9 @@ type LiveWorkRow = {
   toolName: string | null;
   startedAt: number;
   stateStartedAt: number;
+  truthState: "running" | "stale" | "orphaned" | "unverified";
+  lastProgressAt: number;
+  staleForMs: number;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -30,7 +33,7 @@ type LiveWorkResponse = {
   ok: boolean;
   generatedAt: number;
   rows: LiveWorkRow[];
-  summary: { active: number; modelCalls: number; toolCalls: number; workers: number };
+  summary: { active: number; modelCalls: number; toolCalls: number; workers: number; stale: number; orphaned: number; unverified: number };
   warnings?: string[];
   error?: string;
 };
@@ -79,12 +82,12 @@ export function LiveWorkView() {
   const rows = data?.rows || [];
   const stats = useMemo(
     () => {
-      const summary = data?.summary || { active: 0, modelCalls: 0, toolCalls: 0, workers: 0 };
+      const summary = data?.summary || { active: 0, modelCalls: 0, toolCalls: 0, workers: 0, stale: 0, orphaned: 0, unverified: 0 };
       return [
         { label: "Active runs", value: summary.active, icon: Activity },
-        { label: "Model / reasoning", value: summary.modelCalls, icon: BrainCircuit },
-        { label: "Tools", value: summary.toolCalls, icon: Terminal },
         { label: "Workers", value: summary.workers, icon: Users },
+        { label: "Stale", value: summary.stale, icon: BrainCircuit },
+        { label: "Orphaned / unverified", value: summary.orphaned + summary.unverified, icon: Terminal },
       ];
     },
     [data?.summary],
@@ -128,13 +131,28 @@ export function LiveWorkView() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className={cn("h-2.5 w-2.5 animate-pulse rounded-full", row.state === "model" ? "bg-violet-500" : "bg-emerald-500")} />
+                    <span className={cn(
+                      "h-2.5 w-2.5 rounded-full",
+                      row.truthState === "running" && "animate-pulse",
+                      row.truthState === "running" && row.state === "model" && "bg-violet-500",
+                      row.truthState === "running" && row.state === "tool" && "bg-emerald-500",
+                      row.truthState === "stale" && "bg-amber-500",
+                      row.truthState === "orphaned" && "bg-red-500",
+                      row.truthState === "unverified" && "bg-stone-400",
+                    )} />
                     <h2 className="truncate text-sm font-semibold text-stone-900 dark:text-[#f5f7fa]">{row.title}</h2>
                     {row.isWorker && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">worker</span>}
                   </div>
                   <p className="mt-1 truncate font-mono text-[11px] text-stone-400 dark:text-[#7a8591]">{row.sessionKey}</p>
                 </div>
-                <div className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", row.state === "model" ? "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300")}>
+                <div className={cn(
+                  "rounded-full px-2.5 py-1 text-xs font-semibold",
+                  row.truthState === "running" && row.state === "model" && "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
+                  row.truthState === "running" && row.state === "tool" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+                  row.truthState === "stale" && "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+                  row.truthState === "orphaned" && "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+                  row.truthState === "unverified" && "bg-stone-100 text-stone-700 dark:bg-stone-500/15 dark:text-stone-300",
+                )}>
                   {row.stateLabel}
                 </div>
               </div>
@@ -142,6 +160,7 @@ export function LiveWorkView() {
                 <div><p className="text-stone-400">Agent</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]"><Bot className="mr-1 inline h-3.5 w-3.5" />{row.agentId}</p></div>
                 <div><p className="text-stone-400">Model</p><p className="mt-1 truncate font-semibold text-stone-700 dark:text-[#d6dde5]">{row.model}</p></div>
                 <div><p className="text-stone-400">Run time</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]">{elapsed(row.startedAt, now)}</p></div>
+                <div><p className="text-stone-400">Last evidence</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]">{row.lastProgressAt ? `${elapsed(row.lastProgressAt, now)} ago` : "none"}</p></div>
                 <div><p className="text-stone-400">Input</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]">{formatTokens(row.inputTokens)}</p></div>
                 <div><p className="text-stone-400">Output</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]">{formatTokens(row.outputTokens)}</p></div>
                 <div><p className="text-stone-400">Reported total</p><p className="mt-1 font-semibold text-stone-700 dark:text-[#d6dde5]">{formatTokens(row.totalTokens)}{row.tokenDelta ? <span className="ml-1 text-emerald-600">+{formatTokens(row.tokenDelta)}</span> : null}</p></div>
