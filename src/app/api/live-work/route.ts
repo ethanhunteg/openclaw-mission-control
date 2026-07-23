@@ -5,6 +5,8 @@ import {
   collectAuditPages,
   findActiveRunCandidates,
   findActiveTool,
+  mapWithConcurrency,
+  prioritizeLiveRows,
   type AuditEvent,
   type ActiveRunCandidate,
 } from "@/lib/live-work";
@@ -130,7 +132,7 @@ export async function GET() {
       ),
     );
     const candidates = findActiveRunCandidates(allRunEvents);
-    const settled = await Promise.allSettled(candidates.map(describeCandidate));
+    const settled = await mapWithConcurrency(candidates, 4, describeCandidate);
     const rows: LiveWorkRow[] = [];
     for (const result of settled) {
       if (result.status === "fulfilled") {
@@ -139,8 +141,7 @@ export async function GET() {
         warnings.push("One active-run candidate could not be enriched.");
       }
     }
-    rows.sort((a, b) => b.startedAt - a.startedAt);
-    const displayedRows = rows.slice(0, 12);
+    const displayedRows = prioritizeLiveRows(rows).slice(0, 12);
     return NextResponse.json({
       ok: true,
       generatedAt,

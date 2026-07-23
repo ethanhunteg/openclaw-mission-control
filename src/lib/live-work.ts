@@ -28,7 +28,7 @@ export type LiveTruthState = "running" | "stale" | "orphaned" | "unverified";
 
 export async function collectAuditPages(
   fetchPage: (cursor?: string) => Promise<{ events?: AuditEvent[]; nextCursor?: string }>,
-  maxPages = 100,
+  maxPages = 200,
 ): Promise<AuditEvent[]> {
   const events: AuditEvent[] = [];
   let cursor: string | undefined;
@@ -39,6 +39,34 @@ export async function collectAuditPages(
     if (!cursor) return events;
   }
   throw new Error("Audit history exceeded the bounded pagination limit; active-work totals are not safe to report.");
+}
+
+export async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(values.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(values[index]) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+  const workerCount = Math.min(Math.max(1, Math.floor(concurrency)), values.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+export function prioritizeLiveRows<T extends { truthState: LiveTruthState; startedAt: number }>(rows: T[]): T[] {
+  const rank: Record<LiveTruthState, number> = { running: 0, stale: 1, unverified: 2, orphaned: 3 };
+  return [...rows].sort((a, b) => rank[a.truthState] - rank[b.truthState] || b.startedAt - a.startedAt);
 }
 
 const TERMINAL_RUN_STATUSES = new Set([

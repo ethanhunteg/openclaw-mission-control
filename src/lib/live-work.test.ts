@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyLiveWork, collectAuditPages, findActiveRunCandidates, findActiveTool, type AuditEvent } from "./live-work.ts";
+import {
+  classifyLiveWork,
+  collectAuditPages,
+  findActiveRunCandidates,
+  findActiveTool,
+  mapWithConcurrency,
+  prioritizeLiveRows,
+  type AuditEvent,
+} from "./live-work.ts";
 
 test("findActiveRunCandidates keeps unfinished runs and drops terminal runs", () => {
   const events: AuditEvent[] = [
@@ -75,4 +83,27 @@ test("collectAuditPages fails closed instead of reporting partial active totals"
     collectAuditPages(async () => ({ events: [], nextCursor: "more" }), 2),
     /active-work totals are not safe to report/,
   );
+});
+
+test("mapWithConcurrency strictly bounds simultaneous enrichment", async () => {
+  let active = 0;
+  let peak = 0;
+  const results = await mapWithConcurrency([1, 2, 3, 4, 5, 6], 2, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return value * 2;
+  });
+  assert.equal(peak, 2);
+  assert.deepEqual(results.map((result) => result.status === "fulfilled" ? result.value : null), [2, 4, 6, 8, 10, 12]);
+});
+
+test("visible live rows prioritize verified running work over newer stale records", () => {
+  const rows = [
+    { truthState: "stale" as const, startedAt: 30, id: "new-stale" },
+    { truthState: "running" as const, startedAt: 10, id: "old-running" },
+    { truthState: "orphaned" as const, startedAt: 40, id: "new-orphan" },
+  ];
+  assert.deepEqual(prioritizeLiveRows(rows).map((row) => row.id), ["old-running", "new-stale", "new-orphan"]);
 });
