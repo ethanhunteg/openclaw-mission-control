@@ -12,6 +12,10 @@ import {
 } from "@/lib/live-work";
 
 export const dynamic = "force-dynamic";
+const SUCCESS_CACHE_MS = 30_000;
+let cachedSuccess: { expiresAt: number; body: Record<string, unknown> } | undefined;
+let refreshInFlight: Promise<void> | undefined;
+let finishRefresh: (() => void) | undefined;
 
 type AuditListResult = { events?: AuditEvent[]; nextCursor?: string };
 type SessionDescription = {
@@ -122,6 +126,22 @@ async function describeCandidate(candidate: ActiveRunCandidate): Promise<LiveWor
 }
 export async function GET() {
   const generatedAt = Date.now();
+  if (cachedSuccess && cachedSuccess.expiresAt > generatedAt) {
+    return NextResponse.json(cachedSuccess.body, {
+      headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
+    });
+  }
+  if (refreshInFlight) {
+    await refreshInFlight;
+    if (cachedSuccess && cachedSuccess.expiresAt > Date.now()) {
+      return NextResponse.json(cachedSuccess.body, {
+        headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
+      });
+    }
+  }
+  refreshInFlight = new Promise<void>((resolve) => {
+    finishRefresh = resolve;
+  });
   const warnings: string[] = [];
   try {
     const allRunEvents = await collectAuditPages((cursor) =>
@@ -142,7 +162,7 @@ export async function GET() {
       }
     }
     const displayedRows = prioritizeLiveRows(rows).slice(0, 12);
-    return NextResponse.json({
+    const body = {
       ok: true,
       generatedAt,
       rows: displayedRows,
@@ -156,8 +176,18 @@ export async function GET() {
         unverified: rows.filter((row) => row.truthState === "unverified").length,
       },
       warnings: [...new Set(warnings)],
+    };
+    cachedSuccess = { expiresAt: Date.now() + SUCCESS_CACHE_MS, body };
+    finishRefresh?.();
+    refreshInFlight = undefined;
+    finishRefresh = undefined;
+    return NextResponse.json(body, {
+      headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
     });
   } catch (error) {
+    finishRefresh?.();
+    refreshInFlight = undefined;
+    finishRefresh = undefined;
     return NextResponse.json(
       {
         ok: false,
