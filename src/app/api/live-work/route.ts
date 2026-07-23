@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { gatewayCall } from "@/lib/openclaw";
 import {
   classifyLiveWork,
+  collectAuditPages,
   findActiveRunCandidates,
   findActiveTool,
   type AuditEvent,
@@ -10,7 +11,7 @@ import {
 
 export const dynamic = "force-dynamic";
 
-type AuditListResult = { events?: AuditEvent[] };
+type AuditListResult = { events?: AuditEvent[]; nextCursor?: string };
 type SessionDescription = {
   session?: {
     key?: string;
@@ -121,12 +122,14 @@ export async function GET() {
   const generatedAt = Date.now();
   const warnings: string[] = [];
   try {
-    const runEvents = await gatewayCall<AuditListResult>(
-      "audit.list",
-      { kind: "agent_run", after: generatedAt - 24 * 60 * 60 * 1000, limit: 500 },
-      8000,
+    const allRunEvents = await collectAuditPages((cursor) =>
+      gatewayCall<AuditListResult>(
+        "audit.list",
+        { kind: "agent_run", limit: 500, ...(cursor ? { cursor } : {}) },
+        8000,
+      ),
     );
-    const candidates = findActiveRunCandidates(runEvents.events || []).slice(0, 12);
+    const candidates = findActiveRunCandidates(allRunEvents);
     const settled = await Promise.allSettled(candidates.map(describeCandidate));
     const rows: LiveWorkRow[] = [];
     for (const result of settled) {
@@ -137,10 +140,11 @@ export async function GET() {
       }
     }
     rows.sort((a, b) => b.startedAt - a.startedAt);
+    const displayedRows = rows.slice(0, 12);
     return NextResponse.json({
       ok: true,
       generatedAt,
-      rows,
+      rows: displayedRows,
       summary: {
         active: rows.filter((row) => row.truthState === "running").length,
         modelCalls: rows.filter((row) => row.truthState === "running" && row.state === "model").length,

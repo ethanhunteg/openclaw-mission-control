@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyLiveWork, findActiveRunCandidates, findActiveTool, type AuditEvent } from "./live-work.ts";
+import { classifyLiveWork, collectAuditPages, findActiveRunCandidates, findActiveTool, type AuditEvent } from "./live-work.ts";
 
 test("findActiveRunCandidates keeps unfinished runs and drops terminal runs", () => {
   const events: AuditEvent[] = [
@@ -52,4 +52,27 @@ test("active tool evidence advances last progress time", () => {
   });
   assert.equal(result.truthState, "running");
   assert.equal(result.lastProgressAt, 9_000);
+});
+
+test("collectAuditPages follows cursors so older live runs are not truncated", async () => {
+  const requested: Array<string | undefined> = [];
+  const events = await collectAuditPages(async (cursor) => {
+    requested.push(cursor);
+    if (!cursor) {
+      return {
+        events: [{ kind: "agent_run", runId: "new", occurredAt: 20, status: "started" }],
+        nextCursor: "2",
+      };
+    }
+    return { events: [{ kind: "agent_run", runId: "old-live", occurredAt: 10, status: "started" }] };
+  });
+  assert.deepEqual(requested, [undefined, "2"]);
+  assert.deepEqual(events.map((event) => event.runId), ["new", "old-live"]);
+});
+
+test("collectAuditPages fails closed instead of reporting partial active totals", async () => {
+  await assert.rejects(
+    collectAuditPages(async () => ({ events: [], nextCursor: "more" }), 2),
+    /active-work totals are not safe to report/,
+  );
 });

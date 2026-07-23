@@ -26,6 +26,21 @@ export type ActiveRunCandidate = {
 
 export type LiveTruthState = "running" | "stale" | "orphaned" | "unverified";
 
+export async function collectAuditPages(
+  fetchPage: (cursor?: string) => Promise<{ events?: AuditEvent[]; nextCursor?: string }>,
+  maxPages = 100,
+): Promise<AuditEvent[]> {
+  const events: AuditEvent[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await fetchPage(cursor);
+    events.push(...(result.events || []));
+    cursor = result.nextCursor;
+    if (!cursor) return events;
+  }
+  throw new Error("Audit history exceeded the bounded pagination limit; active-work totals are not safe to report.");
+}
+
 const TERMINAL_RUN_STATUSES = new Set([
   "succeeded",
   "failed",
