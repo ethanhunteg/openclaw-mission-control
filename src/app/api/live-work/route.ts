@@ -14,8 +14,8 @@ import {
 export const dynamic = "force-dynamic";
 const SUCCESS_CACHE_MS = 30_000;
 let cachedSuccess: { expiresAt: number; body: Record<string, unknown> } | undefined;
-let refreshInFlight: Promise<void> | undefined;
-let finishRefresh: (() => void) | undefined;
+type RefreshResult = { body: Record<string, unknown>; status: 200 | 503 };
+let refreshInFlight: Promise<RefreshResult> | undefined;
 
 type AuditListResult = { events?: AuditEvent[]; nextCursor?: string };
 type SessionDescription = {
@@ -124,24 +124,7 @@ async function describeCandidate(candidate: ActiveRunCandidate): Promise<LiveWor
     isWorker,
   };
 }
-export async function GET() {
-  const generatedAt = Date.now();
-  if (cachedSuccess && cachedSuccess.expiresAt > generatedAt) {
-    return NextResponse.json(cachedSuccess.body, {
-      headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
-    });
-  }
-  if (refreshInFlight) {
-    await refreshInFlight;
-    if (cachedSuccess && cachedSuccess.expiresAt > Date.now()) {
-      return NextResponse.json(cachedSuccess.body, {
-        headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
-      });
-    }
-  }
-  refreshInFlight = new Promise<void>((resolve) => {
-    finishRefresh = resolve;
-  });
+async function refreshLiveWork(generatedAt: number): Promise<RefreshResult> {
   const warnings: string[] = [];
   try {
     const allRunEvents = await collectAuditPages((cursor) =>
@@ -177,19 +160,11 @@ export async function GET() {
       },
       warnings: [...new Set(warnings)],
     };
-    cachedSuccess = { expiresAt: Date.now() + SUCCESS_CACHE_MS, body };
-    finishRefresh?.();
-    refreshInFlight = undefined;
-    finishRefresh = undefined;
-    return NextResponse.json(body, {
-      headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
-    });
+    return { body, status: 200 };
   } catch (error) {
-    finishRefresh?.();
-    refreshInFlight = undefined;
-    finishRefresh = undefined;
-    return NextResponse.json(
-      {
+    return {
+      status: 503,
+      body: {
         ok: false,
         generatedAt,
         rows: [],
@@ -197,7 +172,33 @@ export async function GET() {
         warnings,
         error: error instanceof Error ? error.message : String(error),
       },
-      { status: 503 },
-    );
+    };
   }
+}
+
+export async function GET() {
+  const generatedAt = Date.now();
+  if (cachedSuccess && cachedSuccess.expiresAt > generatedAt) {
+    return NextResponse.json(cachedSuccess.body, {
+      headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
+    });
+  }
+
+  const activeRefresh = refreshInFlight ?? refreshLiveWork(generatedAt);
+  refreshInFlight = activeRefresh;
+  let result: RefreshResult;
+  try {
+    result = await activeRefresh;
+  } finally {
+    if (refreshInFlight === activeRefresh) refreshInFlight = undefined;
+  }
+  if (result.status === 200) {
+    cachedSuccess = { expiresAt: Date.now() + SUCCESS_CACHE_MS, body: result.body };
+  }
+  return NextResponse.json(result.body, {
+    status: result.status,
+    ...(result.status === 200
+      ? { headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" } }
+      : {}),
+  });
 }
