@@ -3,14 +3,27 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { r as recordAuditEvent } from "/usr/lib/node_modules/openclaw/dist/audit-event-store-D1P32Q4Y.js";
 
 function parseArgs(argv) {
-  const args = { write: false, baseUrl: "http://127.0.0.1:18790", minAgeHours: 24 };
+  const args = {
+    write: false,
+    terminalize: false,
+    includeStale: false,
+    baseUrl: "http://127.0.0.1:18790",
+    minAgeHours: 24,
+    terminalStatus: "cancelled",
+    actorId: "mission-control-live-work-reconcile",
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--write") args.write = true;
+    else if (arg === "--terminalize") args.terminalize = true;
+    else if (arg === "--include-stale") args.includeStale = true;
     else if (arg === "--base-url" && argv[index + 1]) args.baseUrl = argv[++index];
     else if (arg === "--min-age-hours" && argv[index + 1]) args.minAgeHours = Number(argv[++index]);
+    else if (arg === "--terminal-status" && argv[index + 1]) args.terminalStatus = String(argv[++index]).trim().toLowerCase();
+    else if (arg === "--actor-id" && argv[index + 1]) args.actorId = String(argv[++index]).trim();
   }
   return args;
 }
@@ -22,6 +35,66 @@ function getOpenClawHome() {
 
 function suppressionsPath() {
   return join(getOpenClawHome(), "ui", "live-work-suppressions.json");
+}
+
+function normalizeTerminalStatus(value) {
+  return new Set(["cancelled", "failed", "blocked", "timed_out"]).has(value) ? value : "cancelled";
+}
+
+function terminalErrorCode(status) {
+  if (status === "timed_out") return "run_timed_out";
+  if (status === "blocked") return "run_blocked";
+  if (status === "failed") return "run_failed";
+  return "run_cancelled";
+}
+
+function syntheticTerminalOccurredAt(row, now) {
+  return Math.max(
+    now,
+    Number(row.lastProgressAt || 0) + 1,
+    Number(row.startedAt || 0) + 1,
+  );
+}
+
+function syntheticSourceSequence(row, occurredAt) {
+  const lastProgressAt = Math.max(0, Number(row.lastProgressAt || 0));
+  const startedAt = Math.max(0, Number(row.startedAt || 0));
+  return Math.max(occurredAt, lastProgressAt, startedAt) + 1;
+}
+
+function reconcilableTruthStates(args) {
+  return new Set(args.includeStale ? ["orphaned", "unverified", "stale"] : ["orphaned", "unverified"]);
+}
+
+function buildReconciliationReason(row, minAgeMs) {
+  const ageHours = Math.round(minAgeMs / 3600000);
+  if (row.truthState === "stale") return `Auto-closed after ${ageHours}h without fresh progress despite a still-running session key`;
+  return `Auto-closed after ${ageHours}h without a live session owner`;
+}
+
+function writeSyntheticTerminalEvent(row, options) {
+  const occurredAt = syntheticTerminalOccurredAt(row, Date.now());
+  const status = normalizeTerminalStatus(options.terminalStatus);
+  recordAuditEvent({
+    sourceSequence: syntheticSourceSequence(row, occurredAt),
+    occurredAt,
+    kind: "agent_run",
+    action: "agent.run.finished",
+    status,
+    errorCode: terminalErrorCode(status),
+    actorType: "system",
+    actorId: options.actorId || "mission-control-live-work-reconcile",
+    agentId: typeof row.agentId === "string" && row.agentId.trim() ? row.agentId.trim() : "unknown",
+    ...(typeof row.sessionKey === "string" && row.sessionKey.trim() ? { sessionKey: row.sessionKey.trim() } : {}),
+    ...(typeof row.sessionId === "string" && row.sessionId.trim() ? { sessionId: row.sessionId.trim() } : {}),
+    runId: row.runId,
+  }, { env: process.env });
+  return {
+    runId: row.runId,
+    status,
+    occurredAt,
+    sourceSequence: syntheticSourceSequence(row, occurredAt),
+  };
 }
 
 async function main() {
@@ -39,8 +112,9 @@ async function main() {
   if (!payload?.ok || !Array.isArray(payload.rows)) throw new Error("live-work API returned an invalid payload");
 
   const now = Date.now();
+  const eligibleTruthStates = reconcilableTruthStates(args);
   const entries = payload.rows
-    .filter((row) => (row.truthState === "orphaned" || row.truthState === "unverified") && Number(row.staleForMs || 0) >= minAgeMs)
+    .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
     .map((row) => ({
       runId: row.runId,
       sessionKey: row.sessionKey,
@@ -49,15 +123,34 @@ async function main() {
       firstObservedAt: Number(row.startedAt || 0),
       lastProgressAt: Number(row.lastProgressAt || 0),
       staleForMs: Number(row.staleForMs || 0),
-      reason: `Auto-acknowledged after ${Math.round(minAgeMs / 3600000)}h without a live session owner`,
+      reason: buildReconciliationReason(row, minAgeMs),
+      ...(args.terminalize ? {
+        terminalStatus: normalizeTerminalStatus(args.terminalStatus),
+        terminalizationRequestedAt: now,
+      } : {}),
     }))
     .sort((left, right) => right.firstObservedAt - left.firstObservedAt);
+
+  const candidateRows = payload.rows
+    .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
+    .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0));
+
+  const terminalized = [];
+  if (args.write && args.terminalize) {
+    for (const row of candidateRows) {
+      terminalized.push(writeSyntheticTerminalEvent(row, args));
+    }
+  }
 
   const output = {
     version: 1,
     updatedAt: now,
     minAgeMs,
     entries,
+    ...(terminalized.length > 0 ? {
+      terminalizedAt: now,
+      terminalized,
+    } : {}),
   };
 
   if (args.write) {
@@ -71,9 +164,12 @@ async function main() {
   process.stdout.write(`${JSON.stringify({
     ok: true,
     write: args.write,
+    terminalize: args.terminalize,
+    includeStale: args.includeStale,
     baseUrl: args.baseUrl,
     minAgeMs,
     suppressed: entries.length,
+    terminalized: terminalized.length,
     runIds: entries.map((entry) => entry.runId),
   }, null, 2)}\n`);
 }
