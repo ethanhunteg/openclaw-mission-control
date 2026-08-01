@@ -3,13 +3,16 @@ import { gatewayCall } from "@/lib/openclaw";
 import {
   classifyLiveWork,
   collectAuditPages,
+  filterSuppressedRows,
   findActiveRunCandidates,
   findActiveTool,
   mapWithConcurrency,
   prioritizeLiveRows,
+  summarizeLiveRows,
   type AuditEvent,
   type ActiveRunCandidate,
 } from "@/lib/live-work";
+import { loadLiveWorkSuppressions } from "@/lib/live-work-suppressions";
 
 export const dynamic = "force-dynamic";
 const SUCCESS_CACHE_MS = 30_000;
@@ -55,6 +58,7 @@ type LiveWorkRow = {
   outputTokens: number;
   totalTokens: number;
   isWorker: boolean;
+  suppressed?: boolean;
 };
 
 async function describeCandidate(candidate: ActiveRunCandidate): Promise<LiveWorkRow | null> {
@@ -124,7 +128,10 @@ async function describeCandidate(candidate: ActiveRunCandidate): Promise<LiveWor
     isWorker,
   };
 }
-async function refreshLiveWork(generatedAt: number): Promise<RefreshResult> {
+async function refreshLiveWork(
+  generatedAt: number,
+  options: { includeSuppressed: boolean; limit: number },
+): Promise<RefreshResult> {
   const warnings: string[] = [];
   try {
     const allRunEvents = await collectAuditPages((cursor) =>
@@ -144,20 +151,28 @@ async function refreshLiveWork(generatedAt: number): Promise<RefreshResult> {
         warnings.push("One active-run candidate could not be enriched.");
       }
     }
-    const displayedRows = prioritizeLiveRows(rows).slice(0, 12);
+    const suppressions = await loadLiveWorkSuppressions();
+    if (suppressions.warning) warnings.push(suppressions.warning);
+    const rowsWithSuppression = rows.map((row) => ({
+      ...row,
+      suppressed: suppressions.entries.has(row.runId),
+    }));
+    const suppressibleRunIds = new Set(
+      suppressions.stale
+        ? []
+        : rowsWithSuppression
+          .filter((row) => row.suppressed && (row.truthState === "orphaned" || row.truthState === "unverified"))
+          .map((row) => row.runId),
+    );
+    const suppressionResult = filterSuppressedRows(rowsWithSuppression, suppressibleRunIds, options.includeSuppressed);
+    const visibleRows = prioritizeLiveRows(suppressionResult.rows);
+    const displayedRows = options.limit === 0 ? visibleRows : visibleRows.slice(0, Math.max(1, options.limit));
     const body = {
       ok: true,
       generatedAt,
       rows: displayedRows,
-      summary: {
-        active: rows.filter((row) => row.truthState === "running").length,
-        modelCalls: rows.filter((row) => row.truthState === "running" && row.state === "model").length,
-        toolCalls: rows.filter((row) => row.truthState === "running" && row.state === "tool").length,
-        workers: rows.filter((row) => row.truthState === "running" && row.isWorker).length,
-        stale: rows.filter((row) => row.truthState === "stale").length,
-        orphaned: rows.filter((row) => row.truthState === "orphaned").length,
-        unverified: rows.filter((row) => row.truthState === "unverified").length,
-      },
+      totalRows: visibleRows.length,
+      summary: summarizeLiveRows(visibleRows, suppressionResult.suppressed),
       warnings: [...new Set(warnings)],
     };
     return { body, status: 200 };
@@ -168,7 +183,7 @@ async function refreshLiveWork(generatedAt: number): Promise<RefreshResult> {
         ok: false,
         generatedAt,
         rows: [],
-        summary: { active: 0, modelCalls: 0, toolCalls: 0, workers: 0, stale: 0, orphaned: 0, unverified: 0 },
+        summary: { active: 0, modelCalls: 0, toolCalls: 0, workers: 0, stale: 0, orphaned: 0, unverified: 0, suppressed: 0 },
         warnings,
         error: error instanceof Error ? error.message : String(error),
       },
@@ -176,23 +191,35 @@ async function refreshLiveWork(generatedAt: number): Promise<RefreshResult> {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const includeSuppressed = url.searchParams.get("includeSuppressed") === "1";
+  const rawLimit = (url.searchParams.get("limit") || "12").trim().toLowerCase();
+  const requestedLimit = rawLimit === "all" ? 0 : Number(rawLimit);
+  const limit = requestedLimit === 0
+    ? 0
+    : Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(Math.floor(requestedLimit), 5000)
+      : 12;
   const generatedAt = Date.now();
-  if (cachedSuccess && cachedSuccess.expiresAt > generatedAt) {
+  const useDefaultCache = !includeSuppressed && limit === 12;
+  if (useDefaultCache && cachedSuccess && cachedSuccess.expiresAt > generatedAt) {
     return NextResponse.json(cachedSuccess.body, {
       headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=25" },
     });
   }
 
-  const activeRefresh = refreshInFlight ?? refreshLiveWork(generatedAt);
-  refreshInFlight = activeRefresh;
+  const activeRefresh = useDefaultCache
+    ? (refreshInFlight ?? refreshLiveWork(generatedAt, { includeSuppressed, limit }))
+    : refreshLiveWork(generatedAt, { includeSuppressed, limit });
+  if (useDefaultCache) refreshInFlight = activeRefresh;
   let result: RefreshResult;
   try {
     result = await activeRefresh;
   } finally {
-    if (refreshInFlight === activeRefresh) refreshInFlight = undefined;
+    if (useDefaultCache && refreshInFlight === activeRefresh) refreshInFlight = undefined;
   }
-  if (result.status === 200) {
+  if (useDefaultCache && result.status === 200) {
     cachedSuccess = { expiresAt: Date.now() + SUCCESS_CACHE_MS, body: result.body };
   }
   return NextResponse.json(result.body, {

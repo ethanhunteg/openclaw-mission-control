@@ -25,6 +25,16 @@ export type ActiveRunCandidate = {
 };
 
 export type LiveTruthState = "running" | "stale" | "orphaned" | "unverified";
+export type LiveWorkSummary = {
+  active: number;
+  modelCalls: number;
+  toolCalls: number;
+  workers: number;
+  stale: number;
+  orphaned: number;
+  unverified: number;
+  suppressed: number;
+};
 
 export async function collectAuditPages(
   fetchPage: (cursor?: string) => Promise<{ events?: AuditEvent[]; nextCursor?: string }>,
@@ -67,6 +77,32 @@ export async function mapWithConcurrency<T, R>(
 export function prioritizeLiveRows<T extends { truthState: LiveTruthState; startedAt: number }>(rows: T[]): T[] {
   const rank: Record<LiveTruthState, number> = { running: 0, stale: 1, unverified: 2, orphaned: 3 };
   return [...rows].sort((a, b) => rank[a.truthState] - rank[b.truthState] || b.startedAt - a.startedAt);
+}
+
+export function filterSuppressedRows<T extends { runId: string }>(
+  rows: T[],
+  suppressedRunIds: ReadonlySet<string>,
+  includeSuppressed = false,
+): { rows: T[]; suppressed: number } {
+  const suppressed = rows.filter((row) => suppressedRunIds.has(row.runId)).length;
+  if (includeSuppressed || suppressedRunIds.size === 0) return { rows, suppressed };
+  return { rows: rows.filter((row) => !suppressedRunIds.has(row.runId)), suppressed };
+}
+
+export function summarizeLiveRows<T extends { truthState: LiveTruthState; state: "model" | "tool" | "queued"; isWorker: boolean }>(
+  rows: T[],
+  suppressed = 0,
+): LiveWorkSummary {
+  return {
+    active: rows.filter((row) => row.truthState === "running").length,
+    modelCalls: rows.filter((row) => row.truthState === "running" && row.state === "model").length,
+    toolCalls: rows.filter((row) => row.truthState === "running" && row.state === "tool").length,
+    workers: rows.filter((row) => row.truthState === "running" && row.isWorker).length,
+    stale: rows.filter((row) => row.truthState === "stale").length,
+    orphaned: rows.filter((row) => row.truthState === "orphaned").length,
+    unverified: rows.filter((row) => row.truthState === "unverified").length,
+    suppressed,
+  };
 }
 
 const TERMINAL_RUN_STATUSES = new Set([
