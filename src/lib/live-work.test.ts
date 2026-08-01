@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   classifyLiveWork,
   collectAuditPages,
+  filterSuppressedRows,
   findActiveRunCandidates,
   findActiveTool,
   mapWithConcurrency,
   prioritizeLiveRows,
+  summarizeLiveRows,
   type AuditEvent,
 } from "./live-work.ts";
 
@@ -106,4 +108,27 @@ test("visible live rows prioritize verified running work over newer stale record
     { truthState: "orphaned" as const, startedAt: 40, id: "new-orphan" },
   ];
   assert.deepEqual(prioritizeLiveRows(rows).map((row) => row.id), ["old-running", "new-stale", "new-orphan"]);
+});
+
+test("filterSuppressedRows removes acknowledged run ids unless requested", () => {
+  const rows = [
+    { runId: "keep", truthState: "running" as const },
+    { runId: "hide", truthState: "orphaned" as const },
+  ];
+  assert.deepEqual(
+    filterSuppressedRows(rows, new Set(["hide"]), false),
+    { rows: [{ runId: "keep", truthState: "running" }], suppressed: 1 },
+  );
+  assert.equal(filterSuppressedRows(rows, new Set(["hide"]), true).rows.length, 2);
+});
+
+test("summarizeLiveRows reports suppressed rows separately from visible truth states", () => {
+  const summary = summarizeLiveRows([
+    { runId: "a", truthState: "running", state: "model", isWorker: false },
+    { runId: "b", truthState: "orphaned", state: "tool", isWorker: false },
+  ], 3);
+  assert.equal(summary.active, 1);
+  assert.equal(summary.modelCalls, 1);
+  assert.equal(summary.orphaned, 1);
+  assert.equal(summary.suppressed, 3);
 });

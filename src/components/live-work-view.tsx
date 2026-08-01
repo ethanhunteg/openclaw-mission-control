@@ -33,7 +33,8 @@ type LiveWorkResponse = {
   ok: boolean;
   generatedAt: number;
   rows: LiveWorkRow[];
-  summary: { active: number; modelCalls: number; toolCalls: number; workers: number; stale: number; orphaned: number; unverified: number };
+  totalRows?: number;
+  summary: { active: number; modelCalls: number; toolCalls: number; workers: number; stale: number; orphaned: number; unverified: number; suppressed?: number };
   warnings?: string[];
   error?: string;
 };
@@ -82,7 +83,7 @@ export function LiveWorkView() {
   const rows = data?.rows || [];
   const stats = useMemo(
     () => {
-      const summary = data?.summary || { active: 0, modelCalls: 0, toolCalls: 0, workers: 0, stale: 0, orphaned: 0, unverified: 0 };
+      const summary = data?.summary || { active: 0, modelCalls: 0, toolCalls: 0, workers: 0, stale: 0, orphaned: 0, unverified: 0, suppressed: 0 };
       return [
         { label: "Active runs", value: summary.active, icon: Activity },
         { label: "Workers", value: summary.workers, icon: Users },
@@ -116,6 +117,11 @@ export function LiveWorkView() {
         </div>
 
         {error && <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">Live telemetry unavailable: {error}</div>}
+        {(data?.summary?.suppressed || 0) > 0 && (
+          <div className="mt-4 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-800 dark:border-sky-900/50 dark:bg-sky-950/20 dark:text-sky-200">
+            Local reconciliation is hiding {data?.summary?.suppressed} aged orphaned/unverified run{data?.summary?.suppressed === 1 ? "" : "s"} from the Work tab.
+          </div>
+        )}
         {data?.warnings?.map((warning) => <div key={warning} className="mt-3 text-xs text-amber-600 dark:text-amber-300">{warning}</div>)}
 
         <div className="mt-6 space-y-3">
