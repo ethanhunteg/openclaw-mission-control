@@ -39,6 +39,36 @@ export function reconcilableTruthStates(args) {
   return new Set(args.includeStale ? ["orphaned", "unverified", "stale"] : ["orphaned", "unverified"]);
 }
 
+const LIVE_TRUTH_STATES = new Set(["running", "stale", "orphaned", "unverified"]);
+
+function isFiniteNonNegativeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+export function validateReconciliationRows(rows) {
+  if (!Array.isArray(rows)) throw new Error("live-work API returned an invalid rows array");
+  for (const [index, row] of rows.entries()) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error(`live-work API returned an invalid row at index ${index}`);
+    }
+    if (typeof row.runId !== "string" || !row.runId.trim()) {
+      throw new Error(`live-work API returned a row without a valid runId at index ${index}`);
+    }
+    if (typeof row.sessionKey !== "string" || !row.sessionKey.trim()) {
+      throw new Error(`live-work API returned a row without a valid sessionKey at index ${index}`);
+    }
+    if (typeof row.truthState !== "string" || !LIVE_TRUTH_STATES.has(row.truthState)) {
+      throw new Error(`live-work API returned a row with an invalid truthState at index ${index}`);
+    }
+    for (const field of ["staleForMs", "startedAt", "lastProgressAt"]) {
+      if (!isFiniteNonNegativeNumber(row[field])) {
+        throw new Error(`live-work API returned a row with an invalid ${field} at index ${index}`);
+      }
+    }
+  }
+  return rows;
+}
+
 export function buildReconciliationReason(row, minAgeMs) {
   const ageHours = Math.round(minAgeMs / 3600000);
   if (row.truthState === "stale") return `Observed after ${ageHours}h without fresh progress despite a still-running session key; canonical state remains authoritative`;
@@ -77,14 +107,15 @@ async function main() {
   clearTimeout(timeout);
   if (!response.ok) throw new Error(`live-work API returned HTTP ${response.status}`);
   const payload = await response.json();
-  if (!payload?.ok || !Array.isArray(payload.rows)) throw new Error("live-work API returned an invalid payload");
+  if (payload?.ok !== true) throw new Error("live-work API returned an invalid payload status");
+  const rows = validateReconciliationRows(payload.rows);
 
   const now = Date.now();
   const eligibleTruthStates = reconcilableTruthStates(args);
-  const candidateRows = payload.rows
+  const candidateRows = rows
     .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
     .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0));
-  const entries = buildSuppressionEntries(payload.rows, args, minAgeMs, now);
+  const entries = buildSuppressionEntries(rows, args, minAgeMs, now);
 
   const output = {
     version: 1,
