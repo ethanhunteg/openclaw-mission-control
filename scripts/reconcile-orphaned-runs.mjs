@@ -3,7 +3,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { r as recordAuditEvent } from "/usr/lib/node_modules/openclaw/dist/audit-event-store-D1P32Q4Y.js";
+import { pathToFileURL } from "node:url";
 
 function parseArgs(argv) {
   const args = {
@@ -12,8 +12,6 @@ function parseArgs(argv) {
     includeStale: false,
     baseUrl: "http://127.0.0.1:18790",
     minAgeHours: 24,
-    terminalStatus: "cancelled",
-    actorId: "mission-control-live-work-reconcile",
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -22,8 +20,8 @@ function parseArgs(argv) {
     else if (arg === "--include-stale") args.includeStale = true;
     else if (arg === "--base-url" && argv[index + 1]) args.baseUrl = argv[++index];
     else if (arg === "--min-age-hours" && argv[index + 1]) args.minAgeHours = Number(argv[++index]);
-    else if (arg === "--terminal-status" && argv[index + 1]) args.terminalStatus = String(argv[++index]).trim().toLowerCase();
-    else if (arg === "--actor-id" && argv[index + 1]) args.actorId = String(argv[++index]).trim();
+    else if (arg === "--terminal-status" && argv[index + 1]) index += 1;
+    else if (arg === "--actor-id" && argv[index + 1]) index += 1;
   }
   return args;
 }
@@ -37,64 +35,34 @@ function suppressionsPath() {
   return join(getOpenClawHome(), "ui", "live-work-suppressions.json");
 }
 
-function normalizeTerminalStatus(value) {
-  return new Set(["cancelled", "failed", "blocked", "timed_out"]).has(value) ? value : "cancelled";
-}
-
-function terminalErrorCode(status) {
-  if (status === "timed_out") return "run_timed_out";
-  if (status === "blocked") return "run_blocked";
-  if (status === "failed") return "run_failed";
-  return "run_cancelled";
-}
-
-function syntheticTerminalOccurredAt(row, now) {
-  return Math.max(
-    now,
-    Number(row.lastProgressAt || 0) + 1,
-    Number(row.startedAt || 0) + 1,
-  );
-}
-
-function syntheticSourceSequence(row, occurredAt) {
-  const lastProgressAt = Math.max(0, Number(row.lastProgressAt || 0));
-  const startedAt = Math.max(0, Number(row.startedAt || 0));
-  return Math.max(occurredAt, lastProgressAt, startedAt) + 1;
-}
-
-function reconcilableTruthStates(args) {
+export function reconcilableTruthStates(args) {
   return new Set(args.includeStale ? ["orphaned", "unverified", "stale"] : ["orphaned", "unverified"]);
 }
 
-function buildReconciliationReason(row, minAgeMs) {
+export function buildReconciliationReason(row, minAgeMs) {
   const ageHours = Math.round(minAgeMs / 3600000);
-  if (row.truthState === "stale") return `Auto-closed after ${ageHours}h without fresh progress despite a still-running session key`;
-  return `Auto-closed after ${ageHours}h without a live session owner`;
+  if (row.truthState === "stale") return `Observed after ${ageHours}h without fresh progress despite a still-running session key; canonical state remains authoritative`;
+  return `Observed after ${ageHours}h without a live session owner; canonical state remains authoritative`;
 }
 
-function writeSyntheticTerminalEvent(row, options) {
-  const occurredAt = syntheticTerminalOccurredAt(row, Date.now());
-  const status = normalizeTerminalStatus(options.terminalStatus);
-  recordAuditEvent({
-    sourceSequence: syntheticSourceSequence(row, occurredAt),
-    occurredAt,
-    kind: "agent_run",
-    action: "agent.run.finished",
-    status,
-    errorCode: terminalErrorCode(status),
-    actorType: "system",
-    actorId: options.actorId || "mission-control-live-work-reconcile",
-    agentId: typeof row.agentId === "string" && row.agentId.trim() ? row.agentId.trim() : "unknown",
-    ...(typeof row.sessionKey === "string" && row.sessionKey.trim() ? { sessionKey: row.sessionKey.trim() } : {}),
-    ...(typeof row.sessionId === "string" && row.sessionId.trim() ? { sessionId: row.sessionId.trim() } : {}),
-    runId: row.runId,
-  }, { env: process.env });
-  return {
-    runId: row.runId,
-    status,
-    occurredAt,
-    sourceSequence: syntheticSourceSequence(row, occurredAt),
-  };
+export function buildSuppressionEntries(rows, args, minAgeMs, now) {
+  const eligibleTruthStates = reconcilableTruthStates(args);
+  return rows
+    .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
+    // A still-running stale row is ambiguous and must remain visible. The
+    // canonical session/task state, not this local band-aid, owns its truth.
+    .filter((row) => row.truthState === "orphaned" || row.truthState === "unverified")
+    .map((row) => ({
+      runId: row.runId,
+      sessionKey: row.sessionKey,
+      truthState: row.truthState,
+      suppressedAt: now,
+      firstObservedAt: Number(row.startedAt || 0),
+      lastProgressAt: Number(row.lastProgressAt || 0),
+      staleForMs: Number(row.staleForMs || 0),
+      reason: buildReconciliationReason(row, minAgeMs),
+    }))
+    .sort((left, right) => right.firstObservedAt - left.firstObservedAt);
 }
 
 async function main() {
@@ -113,44 +81,21 @@ async function main() {
 
   const now = Date.now();
   const eligibleTruthStates = reconcilableTruthStates(args);
-  const entries = payload.rows
-    .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
-    .map((row) => ({
-      runId: row.runId,
-      sessionKey: row.sessionKey,
-      truthState: row.truthState,
-      suppressedAt: now,
-      firstObservedAt: Number(row.startedAt || 0),
-      lastProgressAt: Number(row.lastProgressAt || 0),
-      staleForMs: Number(row.staleForMs || 0),
-      reason: buildReconciliationReason(row, minAgeMs),
-      ...(args.terminalize ? {
-        terminalStatus: normalizeTerminalStatus(args.terminalStatus),
-        terminalizationRequestedAt: now,
-      } : {}),
-    }))
-    .sort((left, right) => right.firstObservedAt - left.firstObservedAt);
-
   const candidateRows = payload.rows
     .filter((row) => eligibleTruthStates.has(row.truthState) && Number(row.staleForMs || 0) >= minAgeMs)
     .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0));
-
-  const terminalized = [];
-  if (args.write && args.terminalize) {
-    for (const row of candidateRows) {
-      terminalized.push(writeSyntheticTerminalEvent(row, args));
-    }
-  }
+  const entries = buildSuppressionEntries(payload.rows, args, minAgeMs, now);
 
   const output = {
     version: 1,
     updatedAt: now,
     minAgeMs,
     entries,
-    ...(terminalized.length > 0 ? {
-      terminalizedAt: now,
-      terminalized,
-    } : {}),
+    terminalization: {
+      requested: args.terminalize,
+      applied: false,
+      reason: "Synthetic OpenClaw audit writes are retired; canonical session/task state remains authoritative.",
+    },
   };
 
   if (args.write) {
@@ -169,12 +114,16 @@ async function main() {
     baseUrl: args.baseUrl,
     minAgeMs,
     suppressed: entries.length,
-    terminalized: terminalized.length,
+    terminalized: 0,
+    terminalization: output.terminalization,
+    ambiguousStaleRows: candidateRows.filter((row) => row.truthState === "stale").length,
     runIds: entries.map((entry) => entry.runId),
   }, null, 2)}\n`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
