@@ -28,6 +28,17 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
+// Keep the six workspace bootstrap files visible even when a busy workspace
+// has more than the general document limit of recent files.
+const BOOTSTRAP_DOCUMENT_NAMES = new Set([
+  "AGENTS.MD",
+  "SOUL.MD",
+  "TOOLS.MD",
+  "IDENTITY.MD",
+  "USER.MD",
+  "HEARTBEAT.MD",
+]);
+
 type FileInfo = {
   path: string;
   name: string;
@@ -121,6 +132,31 @@ function detectTag(relPath: string, name: string): string {
   return "Other";
 }
 
+function selectDocuments(allDocs: FileInfo[], limit: number): {
+  docs: FileInfo[];
+  truncated: boolean;
+  omittedCount: number;
+  preservedBootstrapPaths: string[];
+} {
+  const sorted = [...allDocs].sort(
+    (a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime()
+  );
+  const bootstrap = sorted.filter((doc) =>
+    BOOTSTRAP_DOCUMENT_NAMES.has(doc.name.toUpperCase())
+  );
+  const bootstrapPaths = new Set(bootstrap.map((doc) => doc.path));
+  const remaining = sorted.filter((doc) => !bootstrapPaths.has(doc.path));
+  const docs = [...bootstrap, ...remaining].slice(0, limit);
+  return {
+    docs,
+    truncated: allDocs.length > docs.length,
+    omittedCount: Math.max(0, allDocs.length - docs.length),
+    preservedBootstrapPaths: docs
+      .filter((doc) => bootstrapPaths.has(doc.path))
+      .map((doc) => doc.path),
+  };
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const filePath = searchParams.get("path");
@@ -134,16 +170,28 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ content, words, size, path: filePath.replace(/^\/+/, "") });
     }
     const workspaces = await discoverWorkspaces();
-    let allDocs: FileInfo[] = [];
+    const allDocs: FileInfo[] = [];
     for (const ws of workspaces) {
       const docs = await scanDir(ws.dir, "", ws.name);
       allDocs.push(...docs);
     }
-    allDocs.sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
-    allDocs = allDocs.slice(0, 200);
-    const tags = Array.from(new Set(allDocs.map((d) => d.tag)));
-    const extensions = Array.from(new Set(allDocs.map((d) => d.ext)));
-    return NextResponse.json({ docs: allDocs, tags, extensions });
+    const selected = selectDocuments(allDocs, 200);
+    const tags = Array.from(new Set(selected.docs.map((d) => d.tag)));
+    const extensions = Array.from(new Set(selected.docs.map((d) => d.ext)));
+    return NextResponse.json({
+      docs: selected.docs,
+      tags,
+      extensions,
+      truncated: selected.truncated,
+      omittedCount: selected.omittedCount,
+      preservedBootstrapPaths: selected.preservedBootstrapPaths,
+      source: {
+        kind: "filesystem",
+        freshness: "request-time",
+        generatedAt: new Date().toISOString(),
+        workspaceCount: workspaces.length,
+      },
+    });
   } catch (err) {
     console.error("Docs API error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
