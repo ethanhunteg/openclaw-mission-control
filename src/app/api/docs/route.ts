@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readdir, readFile, stat, writeFile, unlink, rename, copyFile, mkdir } from "fs/promises";
 import { join, resolve, extname, dirname, basename } from "path";
 import { getOpenClawHome } from "@/lib/paths";
+import { selectDocuments, type DocumentInfo } from "./document-selection";
 
 const OPENCLAW_HOME = getOpenClawHome();
 
@@ -28,15 +29,7 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
-type FileInfo = {
-  path: string;
-  name: string;
-  mtime: string;
-  size: number;
-  tag: string;
-  workspace: string;
-  ext: string;
-};
+type FileInfo = DocumentInfo;
 
 async function discoverWorkspaces(): Promise<{ name: string; dir: string }[]> {
   try {
@@ -121,6 +114,7 @@ function detectTag(relPath: string, name: string): string {
   return "Other";
 }
 
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const filePath = searchParams.get("path");
@@ -134,16 +128,28 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ content, words, size, path: filePath.replace(/^\/+/, "") });
     }
     const workspaces = await discoverWorkspaces();
-    let allDocs: FileInfo[] = [];
+    const allDocs: FileInfo[] = [];
     for (const ws of workspaces) {
       const docs = await scanDir(ws.dir, "", ws.name);
       allDocs.push(...docs);
     }
-    allDocs.sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
-    allDocs = allDocs.slice(0, 200);
-    const tags = Array.from(new Set(allDocs.map((d) => d.tag)));
-    const extensions = Array.from(new Set(allDocs.map((d) => d.ext)));
-    return NextResponse.json({ docs: allDocs, tags, extensions });
+    const selected = selectDocuments(allDocs, 200);
+    const tags = Array.from(new Set(selected.docs.map((d) => d.tag)));
+    const extensions = Array.from(new Set(selected.docs.map((d) => d.ext)));
+    return NextResponse.json({
+      docs: selected.docs,
+      tags,
+      extensions,
+      truncated: selected.truncated,
+      omittedCount: selected.omittedCount,
+      preservedBootstrapPaths: selected.preservedBootstrapPaths,
+      source: {
+        kind: "filesystem",
+        freshness: "request-time",
+        generatedAt: new Date().toISOString(),
+        workspaceCount: workspaces.length,
+      },
+    });
   } catch (err) {
     console.error("Docs API error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
